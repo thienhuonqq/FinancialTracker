@@ -229,6 +229,21 @@ tr:hover td{background:rgba(255,255,255,.025)}
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media(max-width:1100px){.kpi-strip{grid-template-columns:repeat(3,1fr)}.chart-grid-main,.chart-grid-sub{grid-template-columns:1fr}}
 @media(max-width:800px){#sidebar{width:52px;min-width:52px}.sb-item span,.sb-section,.sb-bottom,.sb-brand .sb-title,.sb-brand .sb-sub{display:none}.sb-icon{font-size:18px}.kpi-strip{grid-template-columns:repeat(2,1fr)}.upload-grid,.ins-grid{grid-template-columns:1fr}}
+
+/* ── Google Sheets Sync ───────────────────────────────────────────────────── */
+.g-btn{display:flex;align-items:center;gap:8px;padding:8px 16px;cursor:pointer;font-size:13px;font-weight:500;background:none;border:none;color:var(--muted);width:100%;text-align:left;transition:all .15s}
+.g-btn:hover{color:var(--text);background:rgba(110,64,201,.08)}
+.g-ic{width:18px;text-align:center;font-size:15px;flex-shrink:0}
+.g-profile-row{display:flex;align-items:center;gap:8px;padding:7px 16px;font-size:12px;color:var(--text)}
+.g-sheet-link{display:flex;align-items:center;gap:8px;padding:5px 16px;font-size:12px;color:var(--accent3);cursor:pointer;text-decoration:none;transition:color .15s}
+.g-sheet-link:hover{color:var(--accent2)}
+.sync-status{display:flex;align-items:center;gap:5px;padding:3px 16px 8px;font-size:11px;min-height:22px}
+.sync-lbl{color:var(--muted)}
+.sync-ok .sync-lbl{color:var(--green2)}
+.sync-err .sync-lbl{color:var(--red2)}
+.sync-pending .sync-lbl,.sync-syncing .sync-lbl{color:var(--yellow)}
+.g-setup-note{font-size:11px;color:var(--muted);margin-top:5px;line-height:1.5}
+.g-setup-note a{color:var(--accent3)}
 </style>
 </head>
 <body>
@@ -259,6 +274,12 @@ tr:hover td{background:rgba(255,255,255,.025)}
   <div class="sb-item" id="sb-export">
     <span class="sb-icon">📥</span><span>Export Excel</span>
   </div>
+
+  <div class="sb-section">Backup</div>
+  <div id="g-signin-area">
+    <!-- injected by updateGoogleUI() -->
+  </div>
+  <div id="sync-status" class="sync-status"></div>
 
   <div class="sb-bottom">
     <div class="sb-stat"><span>Records</span><b id="sb-n">—</b></div>
@@ -510,6 +531,31 @@ tr:hover td{background:rgba(255,255,255,.025)}
 
 <div id="toast"></div>
 
+<!-- ═══════════════════ GOOGLE SETUP MODAL ═══════════════════ -->
+<div class="modal-overlay" id="g-setup-modal">
+  <div class="modal" style="width:520px">
+    <h3>☁️ Connect Google Sheets</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:18px;line-height:1.6">Your transactions will automatically sync to a Google Sheet — backed up forever, readable in Excel, and accessible from any device.</p>
+    <div class="form-row">
+      <label>Google OAuth Client ID</label>
+      <input type="text" id="g-client-id-input" placeholder="123456789-abcdef.apps.googleusercontent.com" style="font-size:12px">
+      <div class="g-setup-note">Get this from <a href="https://console.cloud.google.com" target="_blank">Google Cloud Console</a> → APIs &amp; Services → Credentials → OAuth 2.0 Client IDs. See setup instructions above.</div>
+    </div>
+    <div class="form-row" id="g-existing-row" style="display:none">
+      <label>Link an existing Google Sheet (paste URL)</label>
+      <input type="text" id="g-sheet-url-input" placeholder="https://docs.google.com/spreadsheets/d/..." style="font-size:12px">
+      <div class="g-setup-note">Leave blank to create a new sheet automatically.</div>
+    </div>
+    <div class="modal-actions" style="justify-content:space-between">
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('g-existing-row').style.display=document.getElementById('g-existing-row').style.display==='none'?'block':'none'">Link existing sheet ▾</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" onclick="closeGSetup()">Cancel</button>
+        <button class="btn btn-primary" onclick="startGoogleSetup()">Connect →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 'use strict';
 // ════════════════════════════════════════════════════════════════════════════
@@ -651,6 +697,7 @@ function save() {
     localStorage.setItem('ft2_txns', JSON.stringify(transactions));
     localStorage.setItem('ft2_nid', String(nextId));
   } catch(e) { console.warn('Save failed', e); }
+  scheduleSheetSync(); // sync to Google Sheets if connected
 }
 function load() {
   try {
@@ -1556,6 +1603,251 @@ function exportExcel() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  GOOGLE SHEETS SYNC
+// ════════════════════════════════════════════════════════════════════════════
+const GS_SCOPE    = 'https://www.googleapis.com/auth/spreadsheets';
+const SHEET_TITLE = 'FinanceTracker Data';
+const SHEET_TAB   = 'Transactions';
+const HEADERS_ROW = ['id','date','description','amount','category','notes'];
+
+let gToken   = null;      // OAuth access token (in-memory only)
+let gClient  = null;      // GIS TokenClient
+let gSheetId = localStorage.getItem('ft2_sheet_id') || '';
+let gUser    = null;      // { name, email, picture }
+let gReady   = false;     // GIS library loaded?
+let syncTimer = null;     // debounce handle
+let GOOGLE_CLIENT_ID = localStorage.getItem('ft2_g_client_id') || '256054457821-4fojjb3gr1vu6u0lri7lij4upajrpfae.apps.googleusercontent.com';
+
+// ── Low-level fetch wrapper ──────────────────────────────────────────────────
+async function gFetch(url, opts = {}) {
+  if (!gToken) throw new Error('Not signed in');
+  const r = await fetch(url, {
+    ...opts,
+    headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json', ...(opts.headers||{}) }
+  });
+  if (r.status === 401) { gToken = null; updateGoogleUI(); throw new Error('Token expired'); }
+  if (!r.ok) { const t = await r.text(); throw new Error(t); }
+  return r.json();
+}
+
+// ── Bootstrap GIS library ────────────────────────────────────────────────────
+function initGoogle() {
+  if (!GOOGLE_CLIENT_ID) { updateGoogleUI(); return; }
+  const s = document.createElement('script');
+  s.src   = 'https://accounts.google.com/gsi/client';
+  s.async = true;
+  s.onload = () => {
+    gReady  = true;
+    gClient = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope:     GS_SCOPE,
+      callback:  onGoogleToken,
+    });
+    updateGoogleUI();
+    // Silent re-auth if we already have a linked sheet
+    if (gSheetId) gClient.requestAccessToken({ prompt: '' });
+  };
+  document.head.appendChild(s);
+}
+
+// ── Auth actions ─────────────────────────────────────────────────────────────
+function signInGoogle() {
+  if (!GOOGLE_CLIENT_ID) { openGSetup(); return; }
+  if (!gReady) { toast('Google is loading, please try again in a moment', 'err'); return; }
+  gClient.requestAccessToken({ prompt: gToken ? '' : 'consent' });
+}
+
+function signOutGoogle() {
+  if (gToken) { try { google.accounts.oauth2.revoke(gToken, ()=>{}); } catch(e){} }
+  gToken = null; gUser = null;
+  syncIndicator('idle');
+  updateGoogleUI();
+  toast('Signed out of Google', 'info');
+}
+
+async function onGoogleToken(resp) {
+  if (resp.error) {
+    if (resp.error === 'access_denied') return; // user cancelled
+    toast('Google sign-in failed: ' + resp.error, 'err');
+    return;
+  }
+  gToken = resp.access_token;
+  // Fetch profile
+  try {
+    const info = await fetch('https://www.googleapis.com/oauth2/v2/userinfo',
+      { headers: { Authorization: `Bearer ${gToken}` } }).then(r => r.json());
+    gUser = { name: info.given_name || info.name || info.email, email: info.email, picture: info.picture || '' };
+  } catch(e) { gUser = { name: 'Google User', email:'', picture:'' }; }
+  updateGoogleUI();
+  if (!gSheetId) { await createNewSheet(); }
+  else           { await loadFromSheet(); }
+}
+
+// ── Sheet creation ───────────────────────────────────────────────────────────
+async function createNewSheet() {
+  syncIndicator('syncing');
+  try {
+    const resp = await gFetch('https://sheets.googleapis.com/v4/spreadsheets', {
+      method: 'POST',
+      body:   JSON.stringify({ properties: { title: SHEET_TITLE }, sheets:[{ properties:{ title: SHEET_TAB } }] })
+    });
+    gSheetId = resp.spreadsheetId;
+    localStorage.setItem('ft2_sheet_id', gSheetId);
+    await writeAllToSheet();
+    updateGoogleUI();
+    toast(`✓ Created "${SHEET_TITLE}" in your Google Drive`, 'ok');
+  } catch(e) {
+    console.error('Create sheet error:', e);
+    syncIndicator('error');
+    toast('Could not create Google Sheet — check your Client ID setup', 'err');
+  }
+}
+
+// ── Load from sheet ───────────────────────────────────────────────────────────
+async function loadFromSheet() {
+  if (!gToken || !gSheetId) return;
+  syncIndicator('syncing');
+  try {
+    const resp = await gFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gSheetId}/values/${encodeURIComponent(SHEET_TAB+'!A:F')}`
+    );
+    const rows = resp.values || [];
+    if (rows.length <= 1) { await writeAllToSheet(); return; } // empty — push local data up
+    const imported = rows.slice(1).map(r => ({
+      id:          parseInt(r[0])   || nextId++,
+      date:        r[1]             || '',
+      description: r[2]             || '',
+      amount:      parseFloat(r[3]) || 0,
+      category:    r[4]             || 'Other',
+      notes:       r[5]             || '',
+    })).filter(t => t.date && t.description);
+    if (imported.length) {
+      transactions = imported;
+      nextId = Math.max(...imported.map(t => t.id), nextId) + 1;
+      localStorage.setItem('ft2_txns', JSON.stringify(transactions));
+      localStorage.setItem('ft2_nid',  String(nextId));
+      rerender();
+      toast(`✓ Synced ${imported.length} transactions from Google Sheets`, 'ok');
+    }
+    syncIndicator('synced');
+    updateGoogleUI();
+  } catch(e) {
+    console.error('Load from sheet error:', e);
+    syncIndicator('error');
+    toast('Could not load from Google Sheets', 'err');
+  }
+}
+
+// ── Write all data to sheet ──────────────────────────────────────────────────
+async function writeAllToSheet() {
+  if (!gToken || !gSheetId) return;
+  syncIndicator('syncing');
+  const values = [
+    HEADERS_ROW,
+    ...transactions.map(t => [t.id, t.date, t.description, t.amount, t.category, t.notes||''])
+  ];
+  try {
+    // Clear first to remove any stale rows
+    await gFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gSheetId}/values/${encodeURIComponent(SHEET_TAB+'!A1:F9999')}:clear`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
+    // Write all rows
+    await gFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gSheetId}/values/${encodeURIComponent(SHEET_TAB+'!A1:F'+values.length)}?valueInputOption=USER_ENTERED`,
+      { method: 'PUT', body: JSON.stringify({ values }) }
+    );
+    syncIndicator('synced');
+  } catch(e) {
+    console.error('Sync to Sheets failed:', e);
+    syncIndicator('error');
+    toast('⚠️ Google Sheets sync failed', 'err');
+  }
+}
+
+// ── Debounced sync trigger ───────────────────────────────────────────────────
+function scheduleSheetSync() {
+  if (!gToken || !gSheetId) return;
+  clearTimeout(syncTimer);
+  syncIndicator('pending');
+  syncTimer = setTimeout(writeAllToSheet, 3000); // wait 3 s after last change
+}
+
+// ── Link an existing sheet by URL ─────────────────────────────────────────────
+function linkExistingSheet() {
+  const url = prompt('Paste your Google Sheet URL (or just the Sheet ID):');
+  if (!url) return;
+  const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  const id = m ? m[1] : url.trim();
+  if (!id) { toast('Could not find a Sheet ID in that URL', 'err'); return; }
+  gSheetId = id;
+  localStorage.setItem('ft2_sheet_id', gSheetId);
+  if (gToken) { loadFromSheet(); } else { signInGoogle(); }
+}
+
+// ── Setup modal ───────────────────────────────────────────────────────────────
+function openGSetup() { document.getElementById('g-setup-modal').classList.add('open'); }
+function closeGSetup() { document.getElementById('g-setup-modal').classList.remove('open'); }
+
+function startGoogleSetup() {
+  const cid = document.getElementById('g-client-id-input').value.trim();
+  if (!cid || !cid.includes('.apps.googleusercontent.com')) {
+    toast('Please paste a valid Client ID (ends with .apps.googleusercontent.com)', 'err');
+    return;
+  }
+  const sheetUrl = document.getElementById('g-sheet-url-input').value.trim();
+  if (sheetUrl) {
+    const m = sheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+    if (m) { gSheetId = m[1]; localStorage.setItem('ft2_sheet_id', gSheetId); }
+  }
+  GOOGLE_CLIENT_ID = cid;
+  localStorage.setItem('ft2_g_client_id', cid);
+  closeGSetup();
+  gReady = false; gClient = null; // reset so initGoogle() re-loads GIS
+  initGoogle();
+  setTimeout(signInGoogle, 1200); // trigger sign-in after GIS loads
+}
+
+// ── Sidebar UI renderer ───────────────────────────────────────────────────────
+function syncIndicator(status) {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  const MAP = {
+    idle:    { icon:'☁️',  lbl:'',            cls:'' },
+    pending: { icon:'⏳',  lbl:'Queued…',     cls:'sync-pending' },
+    syncing: { icon:'🔄',  lbl:'Syncing…',    cls:'sync-syncing' },
+    synced:  { icon:'✅',  lbl:'Synced',      cls:'sync-ok' },
+    error:   { icon:'⚠️', lbl:'Sync error',  cls:'sync-err' },
+  };
+  const s = MAP[status] || MAP.idle;
+  el.innerHTML = `<span>${s.icon}</span><span class="sync-lbl">${s.lbl}</span>`;
+  el.className = 'sync-status ' + s.cls;
+}
+
+function updateGoogleUI() {
+  const area = document.getElementById('g-signin-area');
+  if (!area) return;
+  if (!GOOGLE_CLIENT_ID) {
+    area.innerHTML = `<div class="g-btn" onclick="openGSetup()"><span class="g-ic">☁️</span><span>Connect Google Sheets</span></div>`;
+    syncIndicator('idle');
+    return;
+  }
+  if (gToken && gUser) {
+    const pic = gUser.picture
+      ? `<img src="${gUser.picture}" style="width:20px;height:20px;border-radius:50%;flex-shrink:0" onerror="this.style.display='none'">`
+      : '👤';
+    area.innerHTML = `
+      <div class="g-profile-row">${pic}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${gUser.name}</span></div>
+      ${gSheetId?`<a class="g-sheet-link" href="https://docs.google.com/spreadsheets/d/${gSheetId}" target="_blank"><span>📊</span><span>Open in Sheets</span></a>`:''}
+      <div class="g-btn" onclick="signOutGoogle()" style="font-size:12px;color:var(--muted)"><span class="g-ic" style="font-size:12px">🚪</span><span>Sign out</span></div>`;
+  } else {
+    area.innerHTML = `
+      <div class="g-btn" onclick="signInGoogle()"><span class="g-ic">🔑</span><span>Sign in with Google</span></div>
+      <div class="g-btn" onclick="openGSetup()" style="font-size:11px;padding:4px 16px;color:var(--muted)"><span class="g-ic" style="font-size:11px">⚙️</span><span>Change settings</span></div>`;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  INIT
 // ════════════════════════════════════════════════════════════════════════════
 function init() {
@@ -1586,6 +1878,10 @@ function init() {
 
   // Default date for manual add
   document.getElementById('m-date').value = new Date().toISOString().slice(0,10);
+
+  // Google Sheets — init connection if previously configured
+  initGoogle();
+  updateGoogleUI();
 
   // Initial render
   rerender();
