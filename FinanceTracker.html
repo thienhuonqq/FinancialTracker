@@ -1605,7 +1605,7 @@ function exportExcel() {
 // ════════════════════════════════════════════════════════════════════════════
 //  GOOGLE SHEETS SYNC
 // ════════════════════════════════════════════════════════════════════════════
-const GS_SCOPE    = 'https://www.googleapis.com/auth/spreadsheets';
+const GS_SCOPE    = 'https://www.googleapis.com/auth/spreadsheets openid profile email';
 const SHEET_TITLE = 'FinanceTracker Data';
 const SHEET_TAB   = 'Transactions';
 const HEADERS_ROW = ['id','date','description','amount','category','notes'];
@@ -1678,6 +1678,26 @@ async function onGoogleToken(resp) {
       { headers: { Authorization: `Bearer ${gToken}` } }).then(r => r.json());
     gUser = { name: info.given_name || info.name || info.email, email: info.email, picture: info.picture || '' };
   } catch(e) { gUser = { name: 'Google User', email:'', picture:'' }; }
+
+  // ── Multi-user isolation: if a different account is signing in, wipe local data ──
+  const prevEmail = localStorage.getItem('ft2_owner_email');
+  const curEmail  = gUser.email || '';
+  if (prevEmail && curEmail && prevEmail !== curEmail) {
+    // Different user on this browser — clear everything and start fresh
+    transactions = [];
+    nextId = 100;
+    gSheetId = '';
+    localStorage.setItem('ft2_txns', '[]');
+    localStorage.setItem('ft2_nid',  '100');
+    localStorage.removeItem('ft2_sheet_id');
+    localStorage.setItem('ft2_owner_email', curEmail);
+    rerender();
+    toast(`Switched to ${curEmail} — starting with a fresh database`, 'info');
+  } else if (curEmail && !prevEmail) {
+    // First sign-in on this browser — record the owner
+    localStorage.setItem('ft2_owner_email', curEmail);
+  }
+
   updateGoogleUI();
   if (!gSheetId) { await createNewSheet(); }
   else           { await loadFromSheet(); }
@@ -1851,9 +1871,13 @@ function updateGoogleUI() {
 //  INIT
 // ════════════════════════════════════════════════════════════════════════════
 function init() {
-  // Load data
+  // Load data — only restore from localStorage, no pre-loaded personal data
   const loaded = load();
-  if (!loaded) { transactions = SEED.map(t=>({...t})); save(); }
+  if (!loaded) {
+    transactions = [];
+    nextId = 100;
+    save();
+  }
 
   // Build UI
   buildCatSelects();
@@ -1865,9 +1889,9 @@ function init() {
   });
   document.getElementById('sb-export').addEventListener('click', exportExcel);
 
-  // Storage info banner (first load)
+  // Welcome banner (first load)
   if (!loaded) {
-    setTimeout(()=>toast('📦 Pre-loaded with your 77 transactions — data saves automatically','info'),800);
+    setTimeout(()=>toast('👋 Welcome! Sign in with Google to sync your data across devices','info'),800);
   }
 
   // Sidebar reset button (right-click on brand)
