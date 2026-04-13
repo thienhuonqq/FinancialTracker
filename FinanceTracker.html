@@ -1605,7 +1605,7 @@ function exportExcel() {
 // ════════════════════════════════════════════════════════════════════════════
 //  GOOGLE SHEETS SYNC
 // ════════════════════════════════════════════════════════════════════════════
-const GS_SCOPE    = 'https://www.googleapis.com/auth/spreadsheets openid profile email';
+const GS_SCOPE    = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.metadata.readonly openid profile email';
 const SHEET_TITLE = 'FinanceTracker Data';
 const SHEET_TAB   = 'Transactions';
 const HEADERS_ROW = ['id','date','description','amount','category','notes'];
@@ -1699,8 +1699,8 @@ async function onGoogleToken(resp) {
   }
 
   updateGoogleUI();
-  if (!gSheetId) { await createNewSheet(); }
-  else           { await loadFromSheet(); }
+  // Always search Drive for the existing sheet first — don't trust localStorage alone
+  await findOrCreateSheet();
 }
 
 // ── Sheet creation ───────────────────────────────────────────────────────────
@@ -1720,6 +1720,38 @@ async function createNewSheet() {
     console.error('Create sheet error:', e);
     syncIndicator('error');
     toast('Could not create Google Sheet — check your Client ID setup', 'err');
+  }
+}
+
+// ── Find existing sheet in Drive, or create one ───────────────────────────────
+async function findOrCreateSheet() {
+  syncIndicator('syncing');
+  try {
+    // Search the user's Drive for an existing "FinanceTracker Data" sheet
+    const q = encodeURIComponent(
+      `name='${SHEET_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`
+    );
+    const search = await gFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=1`
+    );
+    if (search.files && search.files.length > 0) {
+      // Found — link to it (even if localStorage was wiped)
+      const foundId = search.files[0].id;
+      if (foundId !== gSheetId) {
+        gSheetId = foundId;
+        localStorage.setItem('ft2_sheet_id', gSheetId);
+        toast('🔗 Found your existing sheet — loading your data…', 'info');
+      }
+      await loadFromSheet();
+    } else {
+      // Not found — create a brand new one
+      await createNewSheet();
+    }
+  } catch(e) {
+    console.warn('Drive search failed, falling back to cached sheet ID:', e);
+    // Fallback: use whatever sheet ID we have cached
+    if (gSheetId) { await loadFromSheet(); }
+    else           { await createNewSheet(); }
   }
 }
 
