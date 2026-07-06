@@ -392,6 +392,9 @@ tr:hover td{background:rgba(255,255,255,.025)}
           <option value="income">Income only</option>
           <option value="expense">Expenses only</option>
         </select>
+        <select class="sel" id="txn-cat" onchange="updateTxnCategory(this.value)">
+          <option value="">All Categories</option>
+        </select>
         <button class="btn btn-primary" onclick="openAddModal()">+ Add</button>
         <button class="btn btn-outline" onclick="exportExcel()">⬇ Export</button>
         <div style="margin-left:auto;font-size:12px;color:var(--muted)" id="txn-count"></div>
@@ -683,7 +686,7 @@ const state = {
   cats: new Set(),   // empty = all categories shown
   page:'dashboard',
   sortField:'date', sortDir:-1,
-  search:'', typeFilter:'',
+  search:'', typeFilter:'', categoryFilter:'',
   modalId: null, previewRows:[],
   txnPage:0, txnPageSize:50,
 };
@@ -782,6 +785,7 @@ function getFiltered() {
     if (from && t.date < from) return false;
     if (to   && t.date > to)   return false;
     if (state.cats.size && !state.cats.has(t.category)) return false;
+    if (state.categoryFilter && t.category !== state.categoryFilter) return false;
     if (state.typeFilter === 'income'  && t.amount <= 0) return false;
     if (state.typeFilter === 'expense' && t.amount >= 0) return false;
     if (q && !t.description.toLowerCase().includes(q) && !t.category.toLowerCase().includes(q)) return false;
@@ -862,8 +866,10 @@ function normalizeCategory(cat) {
 function syncTxnControls() {
   const searchEl = document.getElementById('txn-search');
   const typeEl = document.getElementById('txn-type');
+  const catEl = document.getElementById('txn-cat');
   if (searchEl) state.search = searchEl.value || '';
   if (typeEl) state.typeFilter = typeEl.value || '';
+  if (catEl) state.categoryFilter = catEl.value || '';
 }
 function updateTxnSearch(value) {
   state.search = value || '';
@@ -872,6 +878,11 @@ function updateTxnSearch(value) {
 }
 function updateTxnType(value) {
   state.typeFilter = value || '';
+  state.txnPage = 0;
+  rerender();
+}
+function updateTxnCategory(value) {
+  state.categoryFilter = value || '';
   state.txnPage = 0;
   rerender();
 }
@@ -1400,6 +1411,8 @@ function renderInsights(txns) {
 function buildCatSelects() {
   const opts = CATS.map(c=>`<option value="${c}">${c}</option>`).join('');
   ['e-cat','m-cat'].forEach(id=>{ const el=document.getElementById(id); if(el) el.innerHTML=opts; });
+  const txnCat = document.getElementById('txn-cat');
+  if (txnCat) txnCat.innerHTML = `<option value="">All Categories</option>${opts}`;
 }
 
 function openEditModal(id) {
