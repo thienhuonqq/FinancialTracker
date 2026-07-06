@@ -385,9 +385,9 @@ tr:hover td{background:rgba(255,255,255,.025)}
       <div class="toolbar">
         <div class="search-wrap">
           <span class="search-ic">🔍</span>
-          <input type="text" id="txn-search" placeholder="Search description…" oninput="renderTxnTable()">
+          <input type="text" id="txn-search" placeholder="Search description…" oninput="updateTxnSearch(this.value)">
         </div>
-        <select class="sel" id="txn-type" onchange="renderTxnTable()">
+        <select class="sel" id="txn-type" onchange="updateTxnType(this.value)">
           <option value="">Income + Expenses</option>
           <option value="income">Income only</option>
           <option value="expense">Expenses only</option>
@@ -754,7 +754,7 @@ function cleanNarrative(raw) {
 // ════════════════════════════════════════════════════════════════════════════
 function getDateRange() {
   const now = new Date();
-  const f = d => d.toISOString().slice(0,10);
+  const f = localYMD;
   switch(state.period) {
     case 'today':      return { from:f(now), to:f(now) };
     case 'week': {
@@ -791,7 +791,7 @@ function getFiltered() {
 function getGroupPeriod() {
   const { from, to } = getDateRange();
   if (!from || !to) return 'month';
-  const d = (new Date(to) - new Date(from)) / 86400000;
+  const d = (dateFromYMD(to) - dateFromYMD(from)) / 86400000;
   if (d <= 14) return 'day';
   if (d <= 90) return 'week';
   return 'month';
@@ -801,9 +801,9 @@ function groupKey(date) {
   const gp = getGroupPeriod();
   if (gp === 'day') return date;
   if (gp === 'week') {
-    const d = new Date(date), ws = new Date(d);
+    const d = dateFromYMD(date), ws = new Date(d);
     ws.setDate(d.getDate() - d.getDay() + 1);
-    return ws.toISOString().slice(0,10);
+    return localYMD(ws);
   }
   return date.slice(0,7);
 }
@@ -821,9 +821,56 @@ function fmtGroupKey(k) {
   if (k.length===7)  return fmtMo(k);
   return k;
 }
+function localYMD(d=new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function dateFromYMD(s) {
+  const [y,m,d] = String(s).split('-').map(Number);
+  return new Date(y, (m||1)-1, d||1);
+}
+function escapeHtml(v='') {
+  return String(v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function escapeAttr(v='') { return escapeHtml(v); }
+function parseMoney(v) {
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+  const neg = /^\s*\(.*\)\s*$/.test(raw) || /(^|[^0-9])-/.test(raw);
+  const n = parseFloat(raw.replace(/[()$,\s]/g,'').replace(/[^\d.-]/g,''));
+  if (isNaN(n)) return null;
+  return neg ? -Math.abs(n) : n;
+}
+function normaliseText(v='') {
+  return String(v)
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[\u2010-\u2015]/g,' ')
+    .replace(/&/g,' and ')
+    .replace(/\b(aus|australia|nsw|au)\b/g,' ')
+    .replace(/[^a-z0-9]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+function transactionKey(t) {
+  return `${t.date}|${Math.round((Number(t.amount)||0)*100)}|${normaliseText(t.description)}`;
+}
+function normalizeCategory(cat) {
+  const found = CATS.find(c => c.toLowerCase() === String(cat||'').trim().toLowerCase());
+  return found || '';
+}
+function updateTxnSearch(value) {
+  state.search = value || '';
+  state.txnPage = 0;
+  rerender();
+}
+function updateTxnType(value) {
+  state.typeFilter = value || '';
+  state.txnPage = 0;
+  rerender();
+}
 function catBadge(cat) {
   const c = COL[cat]||'#94a3b8';
-  return `<span class="cat-badge" style="background:${c}20;color:${c}"><span class="cat-d" style="background:${c}"></span>${cat}</span>`;
+  return `<span class="cat-badge" style="background:${c}20;color:${c}"><span class="cat-d" style="background:${c}"></span>${escapeHtml(cat)}</span>`;
 }
 function toast(msg, type='ok') {
   const el = document.getElementById('toast');
@@ -841,7 +888,7 @@ function stats(txns) {
   const totalExp = Math.abs(exp.reduce((s,t)=>s+t.amount,0));
   const net = totalInc - totalExp;
   const dates = txns.map(t=>t.date).sort();
-  const days = dates.length>1 ? Math.max(1,(new Date(dates.at(-1))-new Date(dates[0]))/86400000+1) : 1;
+  const days = dates.length>1 ? Math.max(1,(dateFromYMD(dates.at(-1))-dateFromYMD(dates[0]))/86400000+1) : 1;
   const dailyAvg = totalExp / days;
   const savingsRate = totalInc>0 ? net/totalInc*100 : 0;
   const byCat = {};
@@ -1082,7 +1129,11 @@ function renderTrend(txns) {
 }
 
 function renderDonut(s) {
-  if (!Object.keys(s.byCat).length) { mkChart('chartDonut',{type:'doughnut',data:{labels:[],datasets:[{data:[]}]},options:{responsive:true,maintainAspectRatio:false}}); return; }
+  if (!Object.keys(s.byCat).length) {
+    document.getElementById('dc-val').textContent = fmtAbs(0);
+    mkChart('chartDonut',{type:'doughnut',data:{labels:[],datasets:[{data:[]}]},options:{responsive:true,maintainAspectRatio:false}});
+    return;
+  }
   const labels = Object.keys(s.byCat).sort((a,b)=>s.byCat[b]-s.byCat[a]);
   const data = labels.map(l=>s.byCat[l]);
   const colors = labels.map(l=>COL[l]||'#94a3b8');
@@ -1182,8 +1233,8 @@ function renderRecent(txns) {
     const c=COL[t.category]||'#94a3b8';
     return `<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border2);cursor:pointer;align-items:center" onclick="openEditModal(${t.id})">
       <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.description}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:1px">${fmtDate(t.date)} · <span style="color:${c}">${t.category}</span></div>
+        <div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.description)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:1px">${fmtDate(t.date)} · <span style="color:${c}">${escapeHtml(t.category)}</span></div>
       </div>
       <div style="font-weight:600;font-size:13px;flex-shrink:0;color:${t.amount>=0?'var(--green2)':'var(--text)'}">${fmt(t.amount)}</div>
     </div>`;
@@ -1210,7 +1261,7 @@ function renderTxnTable(txns) {
     ? pageRows.map(t=>`
       <tr>
         <td style="white-space:nowrap;color:var(--muted)">${fmtDate(t.date)}</td>
-        <td><span style="font-weight:500">${t.description}</span>${t.notes?`<span style="font-size:11px;color:var(--muted);margin-left:6px">${t.notes}</span>`:''}</td>
+        <td><span style="font-weight:500">${escapeHtml(t.description)}</span>${t.notes?`<span style="font-size:11px;color:var(--muted);margin-left:6px">${escapeHtml(t.notes)}</span>`:''}</td>
         <td>${catBadge(t.category)}</td>
         <td style="text-align:right" class="${t.amount>=0?'amt-pos':'amt-neg'}">${fmt(t.amount)}</td>
         <td><button class="btn btn-outline btn-sm" onclick="openEditModal(${t.id})">✏️</button></td>
@@ -1361,7 +1412,7 @@ function openEditModal(id) {
 function openAddModal() {
   state.modalId = null;
   document.getElementById('modal-h').textContent = 'Add Transaction';
-  document.getElementById('e-date').value  = new Date().toISOString().slice(0,10);
+  document.getElementById('e-date').value  = localYMD();
   document.getElementById('e-desc').value  = '';
   document.getElementById('e-cat').value   = 'Groceries';
   document.getElementById('e-amt').value   = '';
@@ -1421,7 +1472,7 @@ function doDrop(e,type){ e.preventDefault(); noDrag(type+'-zone'); const f=e.dat
 function handleCSV(file) {
   if (!file) return;
   const log=document.getElementById('csv-log'); log.style.display='block';
-  log.innerHTML=`<span class="log-ok">📂 ${file.name} (${(file.size/1024).toFixed(1)} KB)</span>\n`;
+  log.innerHTML=`<span class="log-ok">📂 ${escapeHtml(file.name)} (${(file.size/1024).toFixed(1)} KB)</span>\n`;
   prog('csv-prog',30);
   Papa.parse(file,{
     header:true, skipEmptyLines:true,
@@ -1433,58 +1484,91 @@ function handleCSV(file) {
       log.innerHTML+=`<span class="log-ok">✓ ${rows.length} transactions ready for import</span>\n`;
       if(rows.length) showPreview(rows);
     },
-    error(e){ log.innerHTML+=`<span class="log-err">✗ ${e.message}</span>\n`; }
+    error(e){ log.innerHTML+=`<span class="log-err">✗ ${escapeHtml(e.message)}</span>\n`; }
   });
 }
 
 function parseCSVRows(data,fields,log) {
-  const fl=fields.map(f=>f.toLowerCase().trim());
-  const dateCol = fields[fl.findIndex(f=>f==='date'||f.includes('date'))]||fields[0];
-  const descCol = fields[fl.findIndex(f=>['narrative','narr','desc','description','detail','memo','particular'].some(k=>f.includes(k)))]||fields[1];
-  const debitIdx= fl.findIndex(f=>f==='debit amount'||f==='debit'||f.includes('withdrawal'));
-  const credIdx = fl.findIndex(f=>f==='credit amount'||f==='credit'||f.includes('deposit'));
-  const amtIdx  = fl.findIndex(f=>(f==='amount'||f==='amt')&&debitIdx===-1);
-  const debitCol=debitIdx>=0?fields[debitIdx]:null;
-  const credCol =credIdx>=0?fields[credIdx]:null;
-  const amtCol  =amtIdx>=0?fields[amtIdx]:null;
-  if(log) log.innerHTML+=`<span class="log-ok">→ Date:"${dateCol}" Desc:"${descCol}"${amtCol?` Amt:"${amtCol}"`:''}${debitCol?` Deb:"${debitCol}"`:''}${credCol?` Cred:"${credCol}"`:''}</span>\n`;
+  fields = fields || Object.keys(data[0] || {});
+  const fl=fields.map(f=>String(f).toLowerCase().trim());
+  const findCol = tests => {
+    const idx = fl.findIndex(f => tests.some(test => typeof test === 'string' ? f === test : test.test(f)));
+    return idx >= 0 ? fields[idx] : null;
+  };
+
+  const dateCol = findCol(['date', /transaction.*date/, /effective.*date/]) || fields[0];
+  const descCol = findCol([/transaction.*desc/, 'description', 'narrative', 'narration', 'details', 'detail', 'memo', 'particulars', 'particular', 'transaction']) || fields[1];
+  const debitCol = findCol(['debit amount', 'debit', /withdrawal/, /money out/, /paid out/]);
+  const credCol = findCol(['credit amount', 'credit', /deposit/, /money in/, /paid in/]);
+  const balanceCol = findCol(['balance', 'balance amount', /running.*balance/]);
+  const amtCol = findCol(['amount', 'amt', /transaction.*amount/]);
+  const typeCol = findCol(['type', /transaction.*type/, 'dr/cr', 'debit/credit', 'credit/debit']);
+  const catCol = findCol(['category', 'categories']);
+  const notesCol = findCol(['notes', 'note', 'memo notes']);
+  if(log) log.innerHTML+=`<span class="log-ok">→ Date:"${escapeHtml(dateCol)}" Desc:"${escapeHtml(descCol)}"${amtCol?` Amt:"${escapeHtml(amtCol)}"`:''}${debitCol?` Deb:"${escapeHtml(debitCol)}"`:''}${credCol?` Cred:"${escapeHtml(credCol)}"`:''}</span>\n`;
 
   const rows=[];
   for(const row of data){
-    let amount=0;
-    if(amtCol&&row[amtCol]!==undefined&&row[amtCol]!==''){
-      amount=parseFloat(String(row[amtCol]).replace(/[$,\s]/g,''))||0;
-    } else {
-      const d=debitCol?(parseFloat(String(row[debitCol]||'').replace(/[$,\s]/g,''))||0):0;
-      const c=credCol?(parseFloat(String(row[credCol]||'').replace(/[$,\s]/g,''))||0):0;
-      if(c>0)amount=c; else if(d>0)amount=-d;
+    const rawDate = row[dateCol] || '';
+    const date=normaliseDate(rawDate);
+    if(!date){if(log)log.innerHTML+=`<span class="log-warn">⚠ Bad date: "${escapeHtml(rawDate)}"</span>\n`;continue;}
+
+    const rawDesc=String(row[descCol]||'Unknown').trim();
+    const desc=cleanNarrative(rawDesc) || rawDesc || 'Unknown';
+    let amount=null;
+
+    if(debitCol || credCol) {
+      const debit = debitCol ? parseMoney(row[debitCol]) : null;
+      const credit = credCol ? parseMoney(row[credCol]) : null;
+      if(credit && Math.abs(credit)>0) amount = Math.abs(credit);
+      else if(debit && Math.abs(debit)>0) amount = -Math.abs(debit);
     }
-    const date=normaliseDate(row[dateCol]||'');
-    const rawDesc=(row[descCol]||'Unknown').trim();
-    const desc=cleanNarrative(rawDesc);
-    if(!date){if(log)log.innerHTML+=`<span class="log-warn">⚠ Bad date: "${row[dateCol]}"</span>\n`;continue;}
-    let cat=autoCategory(rawDesc.toLowerCase()+' '+desc.toLowerCase());
-    // ANZ-specific overrides
-    if(/bpay/i.test(rawDesc))                                    { cat='Bills'; amount=-Math.abs(amount); }
-    else if(/tfr westpac lif/i.test(rawDesc)&&/withdrawal/i.test(rawDesc))   { cat='Investments'; amount=-Math.abs(amount); }
-    else if(/deposit online.*tfr westpac/i.test(rawDesc))        { cat='Investments'; amount=Math.abs(amount); }
+
+    if(amount === null && amtCol && amtCol !== balanceCol) {
+      amount = parseMoney(row[amtCol]);
+      const type = String(typeCol ? row[typeCol] : '').toLowerCase();
+      if(amount !== null && amount >= 0 && /(debit|withdrawal|money out|payment|dr\b)/.test(type)) amount = -Math.abs(amount);
+      if(amount !== null && /(credit|deposit|money in|cr\b)/.test(type)) amount = Math.abs(amount);
+    }
+
+    if(amount === null || amount === 0) {
+      if(log)log.innerHTML+=`<span class="log-warn">⚠ Missing amount: "${escapeHtml(rawDesc)}"</span>\n`;
+      continue;
+    }
+
+    let cat=normalizeCategory(row[catCol]) || autoCategory(rawDesc.toLowerCase()+' '+desc.toLowerCase());
+    let notes=String(row[notesCol]||'').trim();
+
+    // Australian bank overrides for common transaction narratives.
+    if(/bpay/i.test(rawDesc)) { cat='Bills'; amount=-Math.abs(amount); }
+    else if(/tfr westpac lif/i.test(rawDesc)&&/withdrawal/i.test(rawDesc)) { cat='Investments'; amount=-Math.abs(amount); }
+    else if(/deposit online.*tfr westpac/i.test(rawDesc)) { cat='Investments'; amount=Math.abs(amount); }
     if(/deposit.osko.*nguyen/i.test(rawDesc)||/thi thien nguyen/i.test(rawDesc)){ cat='Income'; amount=Math.abs(amount); }
-    if(/nhung phan/i.test(rawDesc))                              { cat='Bills'; amount=-Math.abs(amount); }
-    rows.push({date,description:desc,amount:Math.round(amount*100)/100,category:cat,notes:''});
+    if(/nhung phan/i.test(rawDesc)) { cat='Bills'; amount=-Math.abs(amount); }
+
+    rows.push({date,description:desc,amount:Math.round(amount*100)/100,category:cat,notes});
   }
   return rows;
 }
 
 function normaliseDate(raw) {
   const s=String(raw).trim();
+  if (/^\d{5}$/.test(s)) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Number(s) * 86400000);
+    return localYMD(d);
+  }
   const pats=[
     [/^(\d{4})-(\d{2})-(\d{2})/,  (a,b,c)=>`${a}-${b}-${c}`],
-    [/^(\d{2})\/(\d{2})\/(\d{4})/, (a,b,c)=>`${c}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`],
-    [/^(\d{2})-(\d{2})-(\d{4})/,   (a,b,c)=>`${c}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`],
-    [/^(\d{2})\/(\d{2})\/(\d{2})$/, (a,b,c)=>`20${c}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`],
+    [/^(\d{1,2})\/(\d{1,2})\/(\d{4})/, (a,b,c)=>`${c}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`],
+    [/^(\d{1,2})-(\d{1,2})-(\d{4})/,   (a,b,c)=>`${c}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`],
+    [/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/, (a,b,c)=>`20${c}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`],
+    [/^(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})/, (a,b,c)=>{
+      const m = MONTHS.findIndex(x=>x.toLowerCase()===b.slice(0,3).toLowerCase())+1;
+      return m ? `${c}-${String(m).padStart(2,'0')}-${a.padStart(2,'0')}` : null;
+    }],
   ];
   for(const [re,fn] of pats){ const m=s.match(re); if(m)return fn(m[1],m[2],m[3]); }
-  const d=new Date(s); return isNaN(d)?null:d.toISOString().slice(0,10);
+  const d=new Date(s); return isNaN(d)?null:localYMD(d);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1493,7 +1577,7 @@ function normaliseDate(raw) {
 function handleImage(file) {
   if(!file) return;
   const log=document.getElementById('img-log'); log.style.display='block';
-  log.innerHTML=`<span class="log-ok">📷 ${file.name}</span>\n`;
+  log.innerHTML=`<span class="log-ok">📷 ${escapeHtml(file.name)}</span>\n`;
   prog('img-prog',10);
   if(typeof Tesseract==='undefined'){
     log.innerHTML+=`<span class="log-ok">⬇ Loading OCR engine…</span>\n`;
@@ -1519,8 +1603,8 @@ async function runOCR(file,log) {
     const rows=parseOCR(data.text,log);
     prog('img-prog',100);
     if(rows.length){ log.innerHTML+=`<span class="log-ok">✓ ${rows.length} transactions found</span>\n`; showPreview(rows); }
-    else { log.innerHTML+=`<span class="log-warn">⚠ No transactions auto-detected\n  Add manually below or review text:</span>\n<pre style="white-space:pre-wrap;color:#94a3b8;font-size:10px">${data.text.slice(0,1500)}</pre>`; }
-  } catch(e){ log.innerHTML+=`<span class="log-err">✗ OCR error: ${e.message}</span>\n`; prog('img-prog',0); }
+    else { log.innerHTML+=`<span class="log-warn">⚠ No transactions auto-detected\n  Add manually below or review text:</span>\n<pre style="white-space:pre-wrap;color:#94a3b8;font-size:10px">${escapeHtml(data.text.slice(0,1500))}</pre>`; }
+  } catch(e){ log.innerHTML+=`<span class="log-err">✗ OCR error: ${escapeHtml(e.message)}</span>\n`; prog('img-prog',0); }
 }
 
 function parseOCR(text,log) {
@@ -1548,21 +1632,41 @@ function showPreview(rows) {
   document.getElementById('preview-box').style.display='block';
   document.getElementById('preview-tbody').innerHTML=rows.map((r,i)=>`
     <tr>
-      <td><input type="date" value="${r.date}" onchange="state.previewRows[${i}].date=this.value" style="background:transparent;border:none;color:var(--text);font-size:12px"></td>
-      <td><input type="text" value="${r.description}" onchange="state.previewRows[${i}].description=this.value" style="background:transparent;border:none;color:var(--text);width:190px;font-size:12px"></td>
+      <td><input type="date" value="${escapeAttr(r.date)}" onchange="state.previewRows[${i}].date=this.value" style="background:transparent;border:none;color:var(--text);font-size:12px"></td>
+      <td><input type="text" value="${escapeAttr(r.description)}" onchange="state.previewRows[${i}].description=this.value" style="background:transparent;border:none;color:var(--text);width:190px;font-size:12px"></td>
       <td><select onchange="state.previewRows[${i}].category=this.value" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;padding:2px 4px">
         ${CATS.map(c=>`<option value="${c}" ${c===r.category?'selected':''}>${c}</option>`).join('')}
       </select></td>
-      <td style="text-align:right"><input type="number" value="${r.amount}" step="0.01" onchange="state.previewRows[${i}].amount=parseFloat(this.value)" style="background:transparent;border:none;color:var(--text);text-align:right;width:80px;font-size:12px"></td>
+      <td style="text-align:right"><input type="number" value="${escapeAttr(r.amount)}" step="0.01" onchange="state.previewRows[${i}].amount=parseFloat(this.value)" style="background:transparent;border:none;color:var(--text);text-align:right;width:80px;font-size:12px"></td>
       <td><button class="btn btn-outline btn-sm" onclick="state.previewRows.splice(${i},1);showPreview(state.previewRows)">✕</button></td>
     </tr>`).join('');
 }
 
 function importPreview() {
   if(!state.previewRows.length) return;
-  const added=state.previewRows.map(r=>({id:nextId++,...r}));
+  const seen = new Set(transactions.map(transactionKey));
+  const added=[];
+  let skipped=0;
+  for (const r of state.previewRows) {
+    const row = {
+      date: r.date,
+      description: String(r.description||'').trim(),
+      amount: Math.round((Number(r.amount)||0)*100)/100,
+      category: normalizeCategory(r.category) || 'Other',
+      notes: String(r.notes||'').trim()
+    };
+    if (!row.date || !row.description || !row.amount) { skipped++; continue; }
+    const key = transactionKey(row);
+    if (seen.has(key)) { skipped++; continue; }
+    seen.add(key);
+    added.push({id:nextId++,...row});
+  }
+  if(!added.length) { clearPreview(); toast(skipped ? `Skipped ${skipped} duplicate/invalid rows` : 'No rows to import', 'info'); return; }
   transactions.push(...added);
-  clearPreview(); save(); toast(`✓ Imported ${added.length} transactions`); rerender();
+  clearPreview(); save();
+  const syncMsg = gToken&&gSheetId ? ' · syncing to Sheets' : (gSheetId ? ' · sign in to sync' : '');
+  toast(`✓ Imported ${added.length} transactions${skipped?`, skipped ${skipped}`:''}${syncMsg}`);
+  rerender();
 }
 function clearPreview() {
   state.previewRows=[];
@@ -1683,6 +1787,10 @@ async function onGoogleToken(resp) {
   const prevEmail = localStorage.getItem('ft2_owner_email');
   const curEmail  = gUser.email || '';
   if (prevEmail && curEmail && prevEmail !== curEmail) {
+    if (transactions.length && !confirm(`This browser has ${transactions.length} local transactions for ${prevEmail}. Switch to ${curEmail} and clear local data? Export first if you need a backup.`)) {
+      signOutGoogle();
+      return;
+    }
     // Different user on this browser — clear everything and start fresh
     transactions = [];
     nextId = 100;
@@ -1755,6 +1863,27 @@ async function findOrCreateSheet() {
   }
 }
 
+function mergeTransactionsFromSheet(imported) {
+  const remoteKeys = new Set(imported.map(transactionKey));
+  const localOnly = transactions.filter(t => !remoteKeys.has(transactionKey(t))).length;
+  const seen = new Set();
+  const merged = [];
+  for (const t of transactions) {
+    const key = transactionKey(t);
+    if (!seen.has(key)) { merged.push(t); seen.add(key); }
+  }
+  let remoteAdded = 0;
+  for (const t of imported) {
+    const key = transactionKey(t);
+    if (!seen.has(key)) { merged.push(t); seen.add(key); remoteAdded++; }
+  }
+  transactions = merged.sort((a,b)=>a.date.localeCompare(b.date) || a.id-b.id);
+  nextId = Math.max(99, ...transactions.map(t => Number(t.id)||0)) + 1;
+  localStorage.setItem('ft2_txns', JSON.stringify(transactions));
+  localStorage.setItem('ft2_nid',  String(nextId));
+  return { remoteAdded, localOnly };
+}
+
 // ── Load from sheet ───────────────────────────────────────────────────────────
 async function loadFromSheet() {
   if (!gToken || !gSheetId) return;
@@ -1770,16 +1899,14 @@ async function loadFromSheet() {
       date:        r[1]             || '',
       description: r[2]             || '',
       amount:      parseFloat(r[3]) || 0,
-      category:    r[4]             || 'Other',
+      category:    normalizeCategory(r[4]) || 'Other',
       notes:       r[5]             || '',
     })).filter(t => t.date && t.description);
     if (imported.length) {
-      transactions = imported;
-      nextId = Math.max(...imported.map(t => t.id), nextId) + 1;
-      localStorage.setItem('ft2_txns', JSON.stringify(transactions));
-      localStorage.setItem('ft2_nid',  String(nextId));
+      const { remoteAdded, localOnly } = mergeTransactionsFromSheet(imported);
       rerender();
-      toast(`✓ Synced ${imported.length} transactions from Google Sheets`, 'ok');
+      if (localOnly) await writeAllToSheet();
+      toast(`✓ Synced ${transactions.length} transactions with Google Sheets${remoteAdded?` · added ${remoteAdded}`:''}`, 'ok');
     }
     syncIndicator('synced');
     updateGoogleUI();
@@ -1806,7 +1933,7 @@ async function writeAllToSheet() {
     );
     // Write all rows
     await gFetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${gSheetId}/values/${encodeURIComponent(SHEET_TAB+'!A1:F'+values.length)}?valueInputOption=USER_ENTERED`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${gSheetId}/values/${encodeURIComponent(SHEET_TAB+'!A1:F'+values.length)}?valueInputOption=RAW`,
       { method: 'PUT', body: JSON.stringify({ values }) }
     );
     syncIndicator('synced');
@@ -1886,11 +2013,11 @@ function updateGoogleUI() {
   }
   if (gToken && gUser) {
     const pic = gUser.picture
-      ? `<img src="${gUser.picture}" style="width:20px;height:20px;border-radius:50%;flex-shrink:0" onerror="this.style.display='none'">`
+      ? `<img src="${escapeAttr(gUser.picture)}" style="width:20px;height:20px;border-radius:50%;flex-shrink:0" onerror="this.style.display='none'">`
       : '👤';
     area.innerHTML = `
-      <div class="g-profile-row">${pic}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${gUser.name}</span></div>
-      ${gSheetId?`<a class="g-sheet-link" href="https://docs.google.com/spreadsheets/d/${gSheetId}" target="_blank"><span>📊</span><span>Open in Sheets</span></a>`:''}
+      <div class="g-profile-row">${pic}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${escapeHtml(gUser.name)}</span></div>
+      ${gSheetId?`<a class="g-sheet-link" href="https://docs.google.com/spreadsheets/d/${escapeAttr(gSheetId)}" target="_blank"><span>📊</span><span>Open in Sheets</span></a>`:''}
       <div class="g-btn" onclick="signOutGoogle()" style="font-size:12px;color:var(--muted)"><span class="g-ic" style="font-size:12px">🚪</span><span>Sign out</span></div>`;
   } else {
     area.innerHTML = `
@@ -1933,7 +2060,7 @@ function init() {
   });
 
   // Default date for manual add
-  document.getElementById('m-date').value = new Date().toISOString().slice(0,10);
+  document.getElementById('m-date').value = localYMD();
 
   // Google Sheets — init connection if previously configured
   initGoogle();
