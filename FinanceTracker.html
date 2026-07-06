@@ -775,6 +775,7 @@ function getDateRange() {
 }
 
 function getFiltered() {
+  syncTxnControls();
   const { from, to } = getDateRange();
   const q = state.search.toLowerCase();
   return transactions.filter(t => {
@@ -857,6 +858,12 @@ function transactionKey(t) {
 function normalizeCategory(cat) {
   const found = CATS.find(c => c.toLowerCase() === String(cat||'').trim().toLowerCase());
   return found || '';
+}
+function syncTxnControls() {
+  const searchEl = document.getElementById('txn-search');
+  const typeEl = document.getElementById('txn-type');
+  if (searchEl) state.search = searchEl.value || '';
+  if (typeEl) state.typeFilter = typeEl.value || '';
 }
 function updateTxnSearch(value) {
   state.search = value || '';
