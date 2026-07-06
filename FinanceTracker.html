@@ -581,9 +581,9 @@ const BUDGET_MO = {  // Monthly budget targets
 };
 
 const KW = {
-  'Income':       ['salary','wage','payroll','thi thien nguyen','deposit-osko.*nguyen','direct credit','osko.*nguyen'],
+  'Income':       ['salary','wage','payroll','thi thien nguyen','deposit-osko.*nguyen','direct credit'],
   'Investments':  ['invest','etf','vanguard','shares','stock','commsec','superhero','raiz','tfr westpac lif','tfr westpac'],
-  'Bills':        ['rent','bill nha','optus','phone bill','wifi','internet','bpay','uts','nhung phan','electricity','insurance','t3','kogan'],
+  'Bills':        ['rent','bill nha','optus','phone bill','wifi','internet','bpay','uts','nhung phan','payment to h nguyen','h nguyen','electricity','insurance','t3','kogan'],
   'Groceries':    ['woolworths','coles','aldi','iga','foodworks','farmers fresh','best mart','market place','food','grocery','mart','supermarket','cleaning'],
   'Transport':    ['tfnsw','transportfornsw','opal','didi','uber','taxi','bus','train','petrol','fuel','parking','beem'],
   'Food & Drink': ['kfc','maccas','mcdonalds','sushi','cafe','coffee','restaurant','eat out','bar','pub','milk tea','uni bros','starbucks','roasters','industry beans','sushi hub','sushi mori','pizza','noodle','pho','dennis','food out','sushi'],
@@ -707,6 +707,9 @@ function load() {
     const raw = localStorage.getItem('ft2_txns');
     if (raw) {
       transactions = JSON.parse(raw);
+      if (applyKnownTransactionRules(transactions)) {
+        localStorage.setItem('ft2_txns', JSON.stringify(transactions));
+      }
       nextId = parseInt(localStorage.getItem('ft2_nid') || '200');
       return true;
     }
@@ -730,6 +733,21 @@ function autoCategory(desc) {
     if (keys.some(k => new RegExp(k).test(d))) return cat;
   }
   return 'Other';
+}
+
+function applyKnownTransactionRules(txns) {
+  let changed = 0;
+  for (const t of txns) {
+    const text = `${t.description || ''} ${t.notes || ''}`.toLowerCase();
+    if (/(payment to|withdrawal[-\s]?osko).*h\s+nguyen\b/i.test(text)) {
+      const oldCat = t.category;
+      const oldAmount = Number(t.amount) || 0;
+      t.category = 'Bills';
+      t.amount = -Math.abs(oldAmount);
+      if (oldCat !== t.category || oldAmount !== t.amount) changed++;
+    }
+  }
+  return changed;
 }
 
 function cleanNarrative(raw) {
@@ -1566,7 +1584,9 @@ function parseCSVRows(data,fields,log) {
     if(/deposit.osko.*nguyen/i.test(rawDesc)||/thi thien nguyen/i.test(rawDesc)){ cat='Income'; amount=Math.abs(amount); }
     if(/nhung phan/i.test(rawDesc)) { cat='Bills'; amount=-Math.abs(amount); }
 
-    rows.push({date,description:desc,amount:Math.round(amount*100)/100,category:cat,notes});
+    const tx = {date,description:desc,amount:Math.round(amount*100)/100,category:cat,notes};
+    applyKnownTransactionRules([tx]);
+    rows.push(tx);
   }
   return rows;
 }
@@ -1675,6 +1695,7 @@ function importPreview() {
       category: normalizeCategory(r.category) || 'Other',
       notes: String(r.notes||'').trim()
     };
+    applyKnownTransactionRules([row]);
     if (!row.date || !row.description || !row.amount) { skipped++; continue; }
     const key = transactionKey(row);
     if (seen.has(key)) { skipped++; continue; }
@@ -1884,6 +1905,8 @@ async function findOrCreateSheet() {
 }
 
 function mergeTransactionsFromSheet(imported) {
+  const localCorrected = applyKnownTransactionRules(transactions);
+  const remoteCorrected = applyKnownTransactionRules(imported);
   const remoteKeys = new Set(imported.map(transactionKey));
   const localOnly = transactions.filter(t => !remoteKeys.has(transactionKey(t))).length;
   const seen = new Set();
@@ -1901,7 +1924,7 @@ function mergeTransactionsFromSheet(imported) {
   nextId = Math.max(99, ...transactions.map(t => Number(t.id)||0)) + 1;
   localStorage.setItem('ft2_txns', JSON.stringify(transactions));
   localStorage.setItem('ft2_nid',  String(nextId));
-  return { remoteAdded, localOnly };
+  return { remoteAdded, localOnly, corrected: localCorrected + remoteCorrected };
 }
 
 // ── Load from sheet ───────────────────────────────────────────────────────────
@@ -1923,10 +1946,10 @@ async function loadFromSheet() {
       notes:       r[5]             || '',
     })).filter(t => t.date && t.description);
     if (imported.length) {
-      const { remoteAdded, localOnly } = mergeTransactionsFromSheet(imported);
+      const { remoteAdded, localOnly, corrected } = mergeTransactionsFromSheet(imported);
       rerender();
-      if (localOnly) await writeAllToSheet();
-      toast(`✓ Synced ${transactions.length} transactions with Google Sheets${remoteAdded?` · added ${remoteAdded}`:''}`, 'ok');
+      if (localOnly || corrected) await writeAllToSheet();
+      toast(`✓ Synced ${transactions.length} transactions with Google Sheets${remoteAdded?` · added ${remoteAdded}`:''}${corrected?` · fixed ${corrected}`:''}`, 'ok');
     }
     syncIndicator('synced');
     updateGoogleUI();
